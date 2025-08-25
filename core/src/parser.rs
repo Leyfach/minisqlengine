@@ -40,6 +40,7 @@ pub struct SelectQuery {
 #[derive(Debug, PartialEq)]
 pub struct InsertQuery {
     pub table: String,
+    pub columns: Option<Vec<String>>,
     pub values: Vec<Value>,
 }
 
@@ -80,9 +81,24 @@ fn parse_value(i: &str) -> IResult<&str, Value> {
 fn parse_values(i: &str) -> IResult<&str, Vec<Value>> {
     delimited(
         char('('),
-        separated_list0(preceded(multispace0, char(',')), preceded(multispace0, parse_value)),
-        char(')')
+        separated_list0(
+            preceded(multispace0, char(',')),
+            preceded(multispace0, parse_value),
+        ),
+        char(')'),
     )(i)
+}
+
+fn parse_column_names(i: &str) -> IResult<&str, Vec<String>> {
+    delimited(
+        char('('),
+        separated_list1(
+            preceded(multispace0, char(',')),
+            preceded(multispace0, identifier),
+        ),
+        char(')'),
+    )(i)
+    .map(|(i, cols)| (i, cols.into_iter().map(|s| s.to_string()).collect()))
 }
 
 fn parse_condition(i: &str) -> IResult<&str, Condition> {
@@ -104,7 +120,10 @@ fn parse_columns(i: &str) -> IResult<&str, Vec<String>> {
     alt((
         map(tag("*"), |_| Vec::new()),
         map(
-            separated_list1(preceded(multispace0, char(',')), preceded(multispace0, identifier)),
+            separated_list1(
+                preceded(multispace0, char(',')),
+                preceded(multispace0, identifier),
+            ),
             |cols: Vec<&str>| cols.into_iter().map(|s| s.to_string()).collect(),
         ),
     ))(i)
@@ -116,7 +135,10 @@ fn parse_order_by(i: &str) -> IResult<&str, (String, bool)> {
     let (i, _) = tag("BY")(i)?;
     let (i, _) = multispace1(i)?;
     let (i, col) = identifier(i)?;
-    let (i, dir) = opt(preceded(multispace1, alt((tag_no_case("ASC"), tag_no_case("DESC")))))(i)?;
+    let (i, dir) = opt(preceded(
+        multispace1,
+        alt((tag_no_case("ASC"), tag_no_case("DESC"))),
+    ))(i)?;
     let asc = match dir {
         Some(d) => d.eq_ignore_ascii_case("ASC"),
         None => true,
@@ -166,7 +188,8 @@ pub fn parse_insert(i: &str) -> IResult<&str, InsertQuery> {
     let (i, _) = tag("INTO")(i)?;
     let (i, _) = multispace1(i)?;
     let (i, table) = identifier(i)?;
-    let (i, _) = multispace1(i)?;
+    let (i, columns) = opt(preceded(multispace0, parse_column_names))(i)?;
+    let (i, _) = multispace0(i)?;
     let (i, _) = tag("VALUES")(i)?;
     let (i, _) = multispace0(i)?;
     let (i, values) = parse_values(i)?;
@@ -174,6 +197,7 @@ pub fn parse_insert(i: &str) -> IResult<&str, InsertQuery> {
         i,
         InsertQuery {
             table: table.to_string(),
+            columns,
             values,
         },
     ))
