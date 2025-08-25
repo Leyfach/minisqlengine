@@ -7,27 +7,63 @@ use crate::parser::Query;
 pub enum Value {
     Int(i64),
     Text(String),
+    Bool(bool),
     Null,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ValueType {
+    Int,
+    Text,
+    Bool,
+    Null,
+}
+
+impl Value {
+    pub fn value_type(&self) -> ValueType {
+        match self {
+            Value::Int(_) => ValueType::Int,
+            Value::Text(_) => ValueType::Text,
+            Value::Bool(_) => ValueType::Bool,
+            Value::Null => ValueType::Null,
+        }
+    }
 }
 
 pub type Row = Vec<Value>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EngineError {
     TableNotFound(String),
     ColumnNotFound(String),
+    ValueCountMismatch,
+    TypeMismatch {
+        column: String,
+        expected: ValueType,
+        found: ValueType,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Column {
+    pub name: String,
+    pub col_type: ValueType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
-    pub columns: Vec<String>,
+    pub columns: Vec<Column>,
     pub rows: Vec<Row>,
 }
 
 impl Table {
-    pub fn new(columns: Vec<String>) -> Self {
+    pub fn new(columns: Vec<(String, ValueType)>) -> Self {
+        let cols = columns
+            .into_iter()
+            .map(|(name, col_type)| Column { name, col_type })
+            .collect();
         Self {
-            columns,
+            columns: cols,
             rows: Vec::new(),
         }
     }
@@ -49,13 +85,25 @@ impl Engine {
         }
     }
 
-    pub fn create_table(&mut self, name: &str, columns: Vec<String>) {
+    pub fn create_table(&mut self, name: &str, columns: Vec<(String, ValueType)>) {
         self.tables.insert(name.to_string(), Table::new(columns));
     }
 
     pub fn insert_into(&mut self, name: &str, values: Row) -> Result<(), EngineError> {
         match self.tables.get_mut(name) {
             Some(table) => {
+                if table.columns.len() != values.len() {
+                    return Err(EngineError::ValueCountMismatch);
+                }
+                for (col, val) in table.columns.iter().zip(values.iter()) {
+                    if col.col_type != val.value_type() {
+                        return Err(EngineError::TypeMismatch {
+                            column: col.name.clone(),
+                            expected: col.col_type.clone(),
+                            found: val.value_type(),
+                        });
+                    }
+                }
                 table.insert(values);
                 Ok(())
             }
@@ -76,7 +124,7 @@ impl Engine {
         let idx = table
             .columns
             .iter()
-            .position(|c| c == column)
+            .position(|c| c.name == column)
             .ok_or_else(|| EngineError::ColumnNotFound(column.to_string()))?;
         Ok(
             table
