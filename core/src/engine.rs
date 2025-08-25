@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use crate::parser::Query;
+use crate::parser::{Query, SelectQuery, Operator, Condition};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
     Int(i64),
     Text(String),
@@ -11,7 +11,7 @@ pub enum Value {
     Null,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ValueType {
     Int,
     Text,
@@ -54,6 +54,7 @@ pub struct Column {
 pub struct Table {
     pub columns: Vec<Column>,
     pub rows: Vec<Row>,
+    pub indices: HashMap<String, HashMap<Value, Vec<usize>>>,
 }
 
 impl Table {
@@ -61,14 +62,35 @@ impl Table {
         let cols = columns
             .into_iter()
             .map(|(name, col_type)| Column { name, col_type })
-            .collect();
+            .collect::<Vec<_>>();
         Self {
             columns: cols,
             rows: Vec::new(),
+            indices: HashMap::new(),
+        }
+    }
+
+    pub fn create_index(&mut self, column: &str) {
+        if let Some(pos) = self.columns.iter().position(|c| c.name == column) {
+            let mut map: HashMap<Value, Vec<usize>> = HashMap::new();
+            for (idx, row) in self.rows.iter().enumerate() {
+                if let Some(val) = row.get(pos) {
+                    map.entry(val.clone()).or_default().push(idx);
+                }
+            }
+            self.indices.insert(column.to_string(), map);
         }
     }
 
     pub fn insert(&mut self, values: Row) {
+        let row_idx = self.rows.len();
+        for (col_idx, value) in values.iter().enumerate() {
+            if let Some(col) = self.columns.get(col_idx) {
+                if let Some(index) = self.indices.get_mut(&col.name) {
+                    index.entry(value.clone()).or_default().push(row_idx);
+                }
+            }
+        }
         self.rows.push(values);
     }
 }
@@ -86,7 +108,11 @@ impl Engine {
     }
 
     pub fn create_table(&mut self, name: &str, columns: Vec<(String, ValueType)>) {
-        self.tables.insert(name.to_string(), Table::new(columns));
+        let mut table = Table::new(columns);
+        if let Some(first_col) = table.columns.get(0) {
+            table.create_index(&first_col.name);
+        }
+        self.tables.insert(name.to_string(), table);
     }
 
     pub fn insert_into(&mut self, name: &str, values: Row) -> Result<(), EngineError> {
@@ -111,34 +137,125 @@ impl Engine {
         }
     }
 
-    pub fn select_all_where(
-        &self,
-        name: &str,
-        column: &str,
-        value: &Value,
-    ) -> Result<Vec<Row>, EngineError> {
-        let table = self
-            .tables
-            .get(name)
-            .ok_or_else(|| EngineError::TableNotFound(name.to_string()))?;
-        let idx = table
+    fn get_column_idx(table: &Table, name: &str) -> Result<usize, EngineError> {
+        table
             .columns
             .iter()
-            .position(|c| c.name == column)
-            .ok_or_else(|| EngineError::ColumnNotFound(column.to_string()))?;
-        Ok(
-            table
-                .rows
+            .position(|c| c.name == name)
+            .ok_or_else(|| EngineError::ColumnNotFound(name.to_string()))
+    }
+
+    fn compare(a: &Value, op: &Operator, b: &Value) -> bool {
+        match (a, b) {
+            (Value::Int(x), Value::Int(y)) => match op {
+                Operator::Eq => x == y,
+                Operator::Ne => x != y,
+                Operator::Lt => x < y,
+                Operator::Le => x <= y,
+                Operator::Gt => x > y,
+                Operator::Ge => x >= y,
+            },
+            (Value::Text(x), Value::Text(y)) => match op {
+                Operator::Eq => x == y,
+                Operator::Ne => x != y,
+                Operator::Lt => x < y,
+                Operator::Le => x <= y,
+                Operator::Gt => x > y,
+                Operator::Ge => x >= y,
+            },
+            (Value::Bool(x), Value::Bool(y)) => match op {
+                Operator::Eq => x == y,
+                Operator::Ne => x != y,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    pub fn select(&self, q: &SelectQuery) -> Result<Vec<Row>, EngineError> {
+        let table = self
+            .tables
+            .get(&q.table)
+            .ok_or_else(|| EngineError::TableNotFound(q.table.clone()))?;
+
+        let mut rows: Vec<Row> = if let Some(cond) = &q.condition {
+            let col_idx = Self::get_column_idx(table, &cond.column)?;
+            if let Operator::Eq = cond.op {
+                if let Some(index) = table.indices.get(&cond.column) {
+                    if let Some(row_indices) = index.get(&cond.value) {
+                        row_indices.iter().map(|&i| table.rows[i].clone()).collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    table
+                        .rows
+                        .iter()
+                        .cloned()
+                        .filter(|r| Self::compare(&r[col_idx], &cond.op, &cond.value))
+                        .collect()
+                }
+            } else {
+                table
+                    .rows
+                    .iter()
+                    .cloned()
+                    .filter(|r| Self::compare(&r[col_idx], &cond.op, &cond.value))
+                    .collect()
+            }
+        } else {
+            table.rows.clone()
+        };
+
+        if let Some((ref col, asc)) = q.order_by {
+            let idx = Self::get_column_idx(table, col)?;
+            rows.sort_by(|a, b| {
+                let va = &a[idx];
+                let vb = &b[idx];
+                match (va, vb) {
+                    (Value::Int(x), Value::Int(y)) => x.cmp(y),
+                    (Value::Text(x), Value::Text(y)) => x.cmp(y),
+                    (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+                    _ => std::cmp::Ordering::Equal,
+                }
+            });
+            if !asc {
+                rows.reverse();
+            }
+        }
+
+        let start = q.offset.unwrap_or(0);
+        let mut rows = if start >= rows.len() {
+            Vec::new()
+        } else {
+            rows.into_iter().skip(start).collect::<Vec<_>>()
+        };
+        if let Some(limit) = q.limit {
+            if rows.len() > limit {
+                rows.truncate(limit);
+            }
+        }
+
+        let result = if q.columns.is_empty() {
+            rows
+        } else {
+            let indices: Result<Vec<usize>, EngineError> = q
+                .columns
                 .iter()
-                .cloned()
-                .filter(|r| r.get(idx) == Some(value))
-                .collect(),
-        )
+                .map(|c| Self::get_column_idx(table, c))
+                .collect();
+            let indices = indices?;
+            rows
+                .into_iter()
+                .map(|r| indices.iter().map(|&i| r[i].clone()).collect())
+                .collect()
+        };
+        Ok(result)
     }
 
     pub fn execute(&mut self, query: crate::parser::Query) -> Result<Vec<Row>, EngineError> {
         match query {
-            crate::parser::Query::Select(q) => self.select_all_where(&q.table, &q.column, &q.value),
+            crate::parser::Query::Select(q) => self.select(&q),
             crate::parser::Query::Insert(q) => {
                 self.insert_into(&q.table, q.values)?;
                 Ok(Vec::new())
