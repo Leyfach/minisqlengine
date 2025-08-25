@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
+use crate::parser::{Condition, Operator, Query, SelectQuery};
 use serde::{Deserialize, Serialize};
-use crate::parser::{Query, SelectQuery, Operator, Condition};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Value {
@@ -115,23 +115,53 @@ impl Engine {
         self.tables.insert(name.to_string(), table);
     }
 
-    pub fn insert_into(&mut self, name: &str, values: Row) -> Result<(), EngineError> {
+    pub fn insert_into(
+        &mut self,
+        name: &str,
+        values: Row,
+        columns: Option<Vec<String>>,
+    ) -> Result<(), EngineError> {
         match self.tables.get_mut(name) {
             Some(table) => {
-                if table.columns.len() != values.len() {
-                    return Err(EngineError::ValueCountMismatch);
-                }
-                for (col, val) in table.columns.iter().zip(values.iter()) {
-                    if col.col_type != val.value_type() {
-                        return Err(EngineError::TypeMismatch {
-                            column: col.name.clone(),
-                            expected: col.col_type.clone(),
-                            found: val.value_type(),
-                        });
+                if let Some(cols) = columns {
+                    if cols.len() != values.len() {
+                        return Err(EngineError::ValueCountMismatch);
                     }
+                    let mut row = vec![Value::Null; table.columns.len()];
+                    for (col_name, val) in cols.iter().zip(values.iter()) {
+                        let idx = table
+                            .columns
+                            .iter()
+                            .position(|c| c.name == *col_name)
+                            .ok_or_else(|| EngineError::ColumnNotFound(col_name.clone()))?;
+                        let col_def = &table.columns[idx];
+                        if col_def.col_type != val.value_type() {
+                            return Err(EngineError::TypeMismatch {
+                                column: col_def.name.clone(),
+                                expected: col_def.col_type.clone(),
+                                found: val.value_type(),
+                            });
+                        }
+                        row[idx] = val.clone();
+                    }
+                    table.insert(row);
+                    Ok(())
+                } else {
+                    if table.columns.len() != values.len() {
+                        return Err(EngineError::ValueCountMismatch);
+                    }
+                    for (col, val) in table.columns.iter().zip(values.iter()) {
+                        if col.col_type != val.value_type() {
+                            return Err(EngineError::TypeMismatch {
+                                column: col.name.clone(),
+                                expected: col.col_type.clone(),
+                                found: val.value_type(),
+                            });
+                        }
+                    }
+                    table.insert(values);
+                    Ok(())
                 }
-                table.insert(values);
-                Ok(())
             }
             None => Err(EngineError::TableNotFound(name.to_string())),
         }
@@ -245,8 +275,7 @@ impl Engine {
                 .map(|c| Self::get_column_idx(table, c))
                 .collect();
             let indices = indices?;
-            rows
-                .into_iter()
+            rows.into_iter()
                 .map(|r| indices.iter().map(|&i| r[i].clone()).collect())
                 .collect()
         };
@@ -257,7 +286,7 @@ impl Engine {
         match query {
             crate::parser::Query::Select(q) => self.select(&q),
             crate::parser::Query::Insert(q) => {
-                self.insert_into(&q.table, q.values)?;
+                self.insert_into(&q.table, q.values, q.columns)?;
                 Ok(Vec::new())
             }
         }

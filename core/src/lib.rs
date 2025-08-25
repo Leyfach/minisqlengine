@@ -1,5 +1,7 @@
 pub mod engine;
 pub mod parser;
 
-pub use engine::{Engine, Row, Table, Value, ValueType, EngineError};
-pub use parser::{parse_query, parse_select, parse_insert, Query, SelectQuery, InsertQuery, Operator, Condition};
+pub use engine::{Engine, EngineError, Row, Table, Value, ValueType};
+pub use parser::{
+    parse_insert, parse_query, parse_select, Condition, InsertQuery, Operator, Query, SelectQuery,
+};
