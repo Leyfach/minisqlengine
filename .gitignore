@@ -1,0 +1,11 @@
+# Rust
+/core/target/
+**/*.rs.bk
+
+# Go
+/server/bin/
+/server/*.exe
+/server/*.exe~
+
+# Misc
+.DS_Store
