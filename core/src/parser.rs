@@ -1,6 +1,6 @@
 use nom::{
     branch::alt,
-    bytes::complete::{tag, take_while1},
+    bytes::complete::{tag, tag_no_case, take_while1},
     character::complete::{char, digit1, multispace0, multispace1},
     combinator::{map, map_res},
     multi::separated_list0,
@@ -39,7 +39,11 @@ fn parse_value(i: &str) -> IResult<&str, Value> {
         delimited(char('\''), take_while1(|c| c != '\''), char('\'')),
         |s: &str| Value::Text(s.to_string()),
     );
-    alt((parse_int, parse_string))(i)
+    let parse_bool = alt((
+        map(tag_no_case("TRUE"), |_| Value::Bool(true)),
+        map(tag_no_case("FALSE"), |_| Value::Bool(false)),
+    ));
+    alt((parse_int, parse_string, parse_bool))(i)
 }
 
 fn parse_values(i: &str) -> IResult<&str, Vec<Value>> {
